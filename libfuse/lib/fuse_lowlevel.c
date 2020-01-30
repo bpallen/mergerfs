@@ -1171,7 +1171,20 @@ static void do_rename(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 	char *newname = oldname + strlen(oldname) + 1;
 
 	if (req->f->op.rename)
-		req->f->op.rename(req, nodeid, oldname, arg->newdir, newname);
+		req->f->op.rename(req, nodeid, oldname, arg->newdir, newname, 0);
+	else
+		fuse_reply_err(req, ENOSYS);
+}
+
+static void do_rename2(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
+{
+	struct fuse_rename2_in *arg = (struct fuse_rename2_in *) inarg;
+	char *oldname = PARAM(arg);
+	char *newname = oldname + strlen(oldname) + 1;
+
+	if (req->f->op.rename)
+		req->f->op.rename(req, nodeid, oldname, arg->newdir, newname,
+				  arg->flags);
 	else
 		fuse_reply_err(req, ENOSYS);
 }
@@ -2340,6 +2353,7 @@ static struct {
     [FUSE_DESTROY]         = { do_destroy,         "DESTROY"         },
     [FUSE_NOTIFY_REPLY]    = { (void *) 1,         "NOTIFY_REPLY"    },
     [FUSE_BATCH_FORGET]    = { do_batch_forget,    "BATCH_FORGET"    },
+	[FUSE_RENAME2]         = { do_rename2,         "RENAME2"         },
     [FUSE_COPY_FILE_RANGE] = { do_copy_file_range, "COPY_FILE_RANGE" },
     [CUSE_INIT]            = { cuse_lowlevel_init, "CUSE_INIT"       },
   };

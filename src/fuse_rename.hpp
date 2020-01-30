@@ -20,5 +20,6 @@ namespace FUSE
 {
   int
   rename(const char *from_,
-         const char *to_);
+         const char *to_,
+		 unsigned flags_);
 }

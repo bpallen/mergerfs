@@ -46,6 +46,10 @@
 #undef FUSE_NODE_SLAB
 #endif
 
+#ifndef RENAME_EXCHANGE
+#define RENAME_EXCHANGE		(1 << 1)	/* Exchange source and dest */
+#endif
+
 #define FUSE_DEFAULT_INTR_SIGNAL SIGUSR1
 
 #define FUSE_UNKNOWN_INO UINT64_MAX
@@ -1303,6 +1307,37 @@ out:
 	return err;
 }
 
+static int exchange_node(struct fuse *f, fuse_ino_t olddir, const char *oldname,
+			 fuse_ino_t newdir, const char *newname)
+{
+	struct node *oldnode;
+	struct node *newnode;
+	int err;
+
+	pthread_mutex_lock(&f->lock);
+	oldnode  = lookup_node(f, olddir, oldname);
+	newnode	 = lookup_node(f, newdir, newname);
+
+	if (oldnode)
+		unhash_name(f, oldnode);
+	if (newnode)
+		unhash_name(f, newnode);
+
+	err = -ENOMEM;
+	if (oldnode) {
+		if (hash_name(f, oldnode, newdir, newname) == -1)
+			goto out;
+	}
+	if (newnode) {
+		if (hash_name(f, newnode, olddir, oldname) == -1)
+			goto out;
+	}
+	err = 0;
+out:
+	pthread_mutex_unlock(&f->lock);
+	return err;
+}
+
 static void set_stat(struct fuse *f, fuse_ino_t nodeid, struct stat *stbuf)
 {
 	if (!f->conf.use_ino)
@@ -1547,12 +1582,13 @@ int fuse_fs_fgetattr(struct fuse_fs *fs, const char *path, struct stat *buf,
 int
 fuse_fs_rename(struct fuse_fs *fs,
                const char     *oldpath,
-               const char     *newpath)
+               const char     *newpath,
+			   unsigned flags)
 {
   fuse_get_context()->private_data = fs->user_data;
 
   if(fs->op.rename)
-    return fs->op.rename(oldpath, newpath);
+    return fs->op.rename(oldpath, newpath, flags);
 
   return -ENOSYS;
 }
@@ -3039,42 +3075,47 @@ fuse_lib_rename(fuse_req_t  req,
                 fuse_ino_t  olddir,
                 const char *oldname,
                 fuse_ino_t  newdir,
-                const char *newname)
+                const char *newname,
+				unsigned flags)
 {
-  int err;
-  struct fuse *f;
-  char *oldpath;
-  char *newpath;
-  struct node *wnode1;
-  struct node *wnode2;
-  struct fuse_intr_data d;
+	int err;
+	struct fuse *f;
+	char *oldpath;
+	char *newpath;
+	struct node *wnode1;
+	struct node *wnode2;
+	struct fuse_intr_data d;
 
-  f = req_fuse_prepare(req);
-  err = get_path2(f,olddir,oldname,newdir,newname,
-                  &oldpath,&newpath,&wnode1,&wnode2);
+	f = req_fuse_prepare(req);
+	err = get_path2(f,olddir,oldname,newdir,newname,&oldpath,&newpath,&wnode1,&wnode2);
 
-  if(!err)
-    {
-      fuse_prepare_interrupt(f,req,&d);
+	if(!err)
+	{
+		fuse_prepare_interrupt(f,req,&d);
 
-      pthread_mutex_lock(&f->lock);
-      if(node_open(wnode2))
-        {
-          err = fuse_fs_prepare_hide(f->fs,newpath,&wnode2->hidden_fh);
-          if(!err)
-            wnode2->is_hidden = 1;
-        }
-      pthread_mutex_unlock(&f->lock);
+		pthread_mutex_lock(&f->lock);
+		if(node_open(wnode2))
+		{
+			err = fuse_fs_prepare_hide(f->fs,newpath,&wnode2->hidden_fh);
+			if(!err)
+				wnode2->is_hidden = 1;
+		}
+		pthread_mutex_unlock(&f->lock);
 
-      err = fuse_fs_rename(f->fs,oldpath,newpath);
-      if(!err)
-        err = rename_node(f,olddir,oldname,newdir,newname);
+		err = fuse_fs_rename(f->fs,oldpath,newpath,flags);
+		if (!err) {
+			if (flags & RENAME_EXCHANGE) {
+				err = exchange_node(f, olddir, oldname, newdir, newname);
+			} else {
+				err = rename_node(f, olddir, oldname, newdir, newname);
+			}
+		}
 
-      fuse_finish_interrupt(f,req,&d);
-      free_path2(f,olddir,newdir,wnode1,wnode2,oldpath,newpath);
-    }
+		fuse_finish_interrupt(f,req,&d);
+		free_path2(f,olddir,newdir,wnode1,wnode2,oldpath,newpath);
+	}
 
-  reply_err(req,err);
+	reply_err(req,err);
 }
 
 static void fuse_lib_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t newparent,

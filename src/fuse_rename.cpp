@@ -29,9 +29,22 @@
 #include "rwlock.hpp"
 #include "ugid.hpp"
 
+#include <fcntl.h>
+#include <sys/syscall.h>
+
+#define RENAME_EXCHANGE		(1 << 1)
+
 using std::string;
 using std::vector;
 using std::set;
+
+static int renameat2(int olddirfd, const char *oldpath, int newdirfd, const char *newpath, unsigned int flags) {
+	return syscall(SYS_renameat2, olddirfd, oldpath, newdirfd, newpath, flags);
+}
+
+static int rename2(const string &oldpath, const string &newpath, unsigned flags) {
+	return renameat2(AT_FDCWD, oldpath.c_str(), AT_FDCWD, newpath.c_str(), flags);
+}
 
 static
 bool
@@ -64,7 +77,8 @@ _rename_create_path_core(const vector<const string*> &oldbasepaths,
                          const char                  *newfusepath,
                          const string                &newfusedirpath,
                          int                         &error,
-                         vector<string>              &tounlink)
+                         vector<string>              &tounlink,
+						 unsigned                     flags)
 {
   int rv;
   bool ismember;
@@ -80,7 +94,7 @@ _rename_create_path_core(const vector<const string*> &oldbasepaths,
           oldfullpath = fs::path::make(oldbasepath,oldfusepath);
           newfullpath = fs::path::make(oldbasepath,newfusepath);
 
-          rv = fs::rename(oldfullpath,newfullpath);
+          rv = rename2(oldfullpath, newfullpath, flags);
         }
 
       error = error::calc(rv,error,errno);
@@ -102,7 +116,8 @@ _rename_create_path(Policy::Func::Search  searchFunc,
                     const Branches       &branches_,
                     const uint64_t        minfreespace,
                     const char           *oldfusepath,
-                    const char           *newfusepath)
+                    const char           *newfusepath,
+					unsigned              flags)
 {
   int rv;
   int error;
@@ -130,7 +145,7 @@ _rename_create_path(Policy::Func::Search  searchFunc,
                                oldbasepath,*newbasepath[0],
                                oldfusepath,newfusepath,
                                newfusedirpath,
-                               error,toremove);
+                               error,toremove,flags);
     }
 
 
@@ -197,7 +212,8 @@ _rename_preserve_path_core(Policy::Func::Search         searchFunc,
                            const char                  *oldfusepath,
                            const char                  *newfusepath,
                            int                         &error,
-                           vector<string>              &toremove)
+                           vector<string>              &toremove,
+						   unsigned                     flags)
 {
   int rv;
   bool ismember;
@@ -212,14 +228,14 @@ _rename_preserve_path_core(Policy::Func::Search         searchFunc,
 
       oldfullpath = fs::path::make(oldbasepath,oldfusepath);
 
-      rv = fs::rename(oldfullpath,newfullpath);
-      if((rv == -1) && (errno == ENOENT))
+      rv = rename2(oldfullpath, newfullpath, flags);
+      if((rv == -1) && (errno == ENOENT) && !(flags & RENAME_EXCHANGE))
         {
           rv = _clonepath_if_would_create(searchFunc,createFunc,
                                           branches_,minfreespace,
                                           oldbasepath,oldfusepath,newfusepath);
           if(rv == 0)
-            rv = fs::rename(oldfullpath,newfullpath);
+            rv = rename2(oldfullpath, newfullpath, flags);
         }
 
       error = error::calc(rv,error,errno);
@@ -240,7 +256,8 @@ _rename_preserve_path(Policy::Func::Search  searchFunc,
                       const Branches       &branches_,
                       const uint64_t        minfreespace,
                       const char           *oldfusepath,
-                      const char           *newfusepath)
+                      const char           *newfusepath,
+					  unsigned              flags)
 {
   int rv;
   int error;
@@ -260,7 +277,7 @@ _rename_preserve_path(Policy::Func::Search  searchFunc,
                                  branches_,minfreespace,
                                  oldbasepaths,oldbasepath,
                                  oldfusepath,newfusepath,
-                                 error,toremove);
+                                 error,toremove,flags);
     }
 
   if(error == 0)
@@ -273,9 +290,12 @@ namespace FUSE
 {
   int
   rename(const char *oldpath,
-         const char *newpath)
+         const char *newpath,
+		 unsigned flags)
   {
-    const fuse_context      *fc     = fuse_get_context();
+    if (flags & ~(RENAME_EXCHANGE)) return -ENOSYS;
+	
+	const fuse_context      *fc     = fuse_get_context();
     const Config            &config = Config::get(fc);
     const ugid::Set          ugid(fc->uid,fc->gid);
     const rwlock::ReadGuard  readlock(&config.branches_lock);
@@ -289,13 +309,15 @@ namespace FUSE
                                    config.branches,
                                    config.minfreespace,
                                    oldpath,
-                                   newpath);
+                                   newpath,
+								   flags);
 
     return _rename_create_path(config.getattr,
                                config.rename,
                                config.branches,
                                config.minfreespace,
                                oldpath,
-                               newpath);
+                               newpath,
+							   flags);
   }
 }
